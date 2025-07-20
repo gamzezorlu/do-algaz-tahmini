@@ -9,4 +9,4 @@ rich
 markdown-it-py
 mdurl
 pygments
-sklearn
+scikit-learn
