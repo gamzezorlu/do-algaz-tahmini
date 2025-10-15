@@ -5,17 +5,80 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import cross_val_score
+import warnings
+warnings.filterwarnings('ignore')
 
-# --------------------------------------------
-# 📊 1. Veri Yükleme
-# --------------------------------------------
-df = pd.read_excel("dogalgaz_tuketim.xlsx")
+# Sayfa konfigürasyonu
+st.set_page_config(
+    page_title="Doğalgaz Tüketim Tahmin Uygulaması",
+    page_icon="🔥",
+    layout="wide"
+)
 
-# Tarih formatı düzenleme
-df['Tarih'] = pd.to_datetime(df['Tarih'])
-df = df.sort_values('Tarih')
+st.title("🔥 Doğalgaz Tüketim Tahmin Uygulaması")
+st.markdown("---")
 
-# --------------------------------------------
+# Sidebar - Veri Yükleme
+st.sidebar.header("📁 Veri Yükleme")
+uploaded_file = st.sidebar.file_uploader(
+    "Excel dosyasını yükleyin",
+    type=['xlsx', 'xls'],
+    help="Tarih, Doğalgaz Tüketim, Ortalama Sıcaklık, Nem, Rüzgar, Yağış sütunları olmalıdır"
+)
+
+# Örnek veri formatı göster
+with st.sidebar.expander("📋 Beklenen Veri Formatı"):
+    st.write("""
+    **Gerekli Sütunlar:**
+    - Tarih (Jan2010, Feb2010, ...)
+    - Dogalgaz_Tuketim (Milyon m³)
+    - Ortalama_Sicaklik (°C)
+    - Nem (%)
+    - Ruzgar (m/s)
+    - Yagis (mm)
+    """)
+
+def load_and_process_data(df):
+    """Veriyi yükle ve işle"""
+    # Tarih sütununu datetime'a çevir
+    if 'Tarih' in df.columns:
+        df['Tarih'] = pd.to_datetime(df['Tarih'], format='%b%Y', errors='coerce')
+    
+    # Eksik tarihleri temizle
+    df = df.dropna(subset=['Tarih']).sort_values('Tarih').reset_index(drop=True)
+    
+    # Zaman serisi özellikleri ekle
+    df['Yil'] = df['Tarih'].dt.year
+    df['Ay'] = df['Tarih'].dt.month
+    df['Mevsim'] = df['Ay'].map({
+        12: 'Kış', 1: 'Kış', 2: 'Kış',
+        3: 'İlkbahar', 4: 'İlkbahar', 5: 'İlkbahar',
+        6: 'Yaz', 7: 'Yaz', 8: 'Yaz',
+        9: 'Sonbahar', 10: 'Sonbahar', 11: 'Sonbahar'
+    })
+    
+    # Sıcaklık bazlı özellikler
+    df['Sicaklik_Kare'] = df['Ortalama_Sicaklik'] ** 2
+    df['Sogutma_Derece_Gun'] = np.where(df['Ortalama_Sicaklik'] > 18, 
+                                         df['Ortalama_Sicaklik'] - 18, 0)
+    df['Isitma_Derece_Gun'] = np.where(df['Ortalama_Sicaklik'] < 18, 
+                                       18 - df['Ortalama_Sicaklik'], 0)
+    
+    return df
+    
+    ------------------------------
 # 🔄 2. Log Dönüşümü ve Gecikmeli Değişkenler
 # --------------------------------------------
 df['Dogalgaz_Tuketim_Log'] = np.log1p(df['Dogalgaz_Tuketim'])
