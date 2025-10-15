@@ -139,7 +139,7 @@ def load_and_process_data(df):
     return df
 
 def train_model(df, model_type):
-    """Model eğitimi"""
+    """Model eğitimi - SON 3 YIL AĞIRLIKLI"""
     feature_cols = [
         'Ay', 'Yil', 'Ceyrek', 'Trend', 'Yil_Normalized',
         'Ay_Sin', 'Ay_Cos',
@@ -152,7 +152,18 @@ def train_model(df, model_type):
     ]
     
     X = df[feature_cols]
-    y = df['Dogalgaz_Tuketim']  # LOG KULLANMIYORUZ
+    y = df['Dogalgaz_Tuketim']
+    
+    # AĞIRLIKLANDIRMA: Son 3 yıla daha fazla önem ver
+    max_year = df['Yil'].max()
+    weights = np.ones(len(df))
+    for i, year in enumerate(df['Yil']):
+        if year >= max_year - 2:  # Son 3 yıl
+            weights[i] = 3.0
+        elif year >= max_year - 4:  # Son 5 yıl
+            weights[i] = 2.0
+        else:
+            weights[i] = 1.0
     
     # Ölçekleme
     scaler = StandardScaler()
@@ -161,37 +172,37 @@ def train_model(df, model_type):
     # Model seçimi ve eğitimi
     if model_type == "Random Forest":
         model = RandomForestRegressor(
-            n_estimators=300,
-            max_depth=15,
-            min_samples_split=3,
-            min_samples_leaf=2,
+            n_estimators=500,
+            max_depth=20,
+            min_samples_split=2,
+            min_samples_leaf=1,
             max_features='sqrt',
             random_state=42,
             n_jobs=-1
         )
     elif model_type == "Gradient Boosting":
         model = GradientBoostingRegressor(
-            n_estimators=300,
-            max_depth=5,
+            n_estimators=500,
+            max_depth=8,
             learning_rate=0.05,
-            min_samples_split=3,
-            min_samples_leaf=2,
+            min_samples_split=2,
+            min_samples_leaf=1,
             subsample=0.8,
             random_state=42
         )
     else:  # Ensemble
         model1 = RandomForestRegressor(
-            n_estimators=200, max_depth=15, random_state=42, n_jobs=-1
+            n_estimators=400, max_depth=20, min_samples_split=2, random_state=42, n_jobs=-1
         )
         model2 = GradientBoostingRegressor(
-            n_estimators=200, max_depth=5, learning_rate=0.05, random_state=42
+            n_estimators=400, max_depth=8, learning_rate=0.05, random_state=42
         )
-        model1.fit(X_scaled, y)
-        model2.fit(X_scaled, y)
+        model1.fit(X_scaled, y, sample_weight=weights)
+        model2.fit(X_scaled, y, sample_weight=weights)
         model = (model1, model2)
     
     if model_type != "Ensemble (İkisi Birden)":
-        model.fit(X_scaled, y)
+        model.fit(X_scaled, y, sample_weight=weights)
         y_pred = model.predict(X_scaled)
     else:
         y_pred = (model[0].predict(X_scaled) + model[1].predict(X_scaled)) / 2
@@ -201,13 +212,13 @@ def train_model(df, model_type):
     return model, scaler, X, y, y_pred, y_real, feature_cols
 
 def predict_future(model, scaler, df, feature_cols, n_months, model_type):
-    """Gelecek tahminleri"""
+    """Gelecek tahminleri - GEÇMİŞ AYLIK ORTALAMA BAZLI"""
     last_date = df['Tarih'].max()
     future_dates = pd.date_range(last_date + pd.DateOffset(months=1), 
                                  periods=n_months, freq='MS')
     
-    # Son 12 ayın gerçek değerlerini kullan
-    last_12_values = list(df['Dogalgaz_Tuketim'].iloc[-12:])
+    # Son 24 ayın gerçek değerlerini kullan
+    last_24_values = list(df['Dogalgaz_Tuketim'].iloc[-24:])
     last_trend = df['Trend'].iloc[-1]
     base_year = df['Yil'].min()
     year_range = df['Yil'].max() - base_year
@@ -217,8 +228,11 @@ def predict_future(model, scaler, df, feature_cols, n_months, model_type):
     recent_df = df[df['Yil'] >= recent_years]
     monthly_avg_temp = recent_df.groupby('Ay')['Ortalama_Sicaklik'].mean().to_dict()
     
+    # HER AY İÇİN SON 3 YILIN ORTALAMA TÜKETİMİNİ HESAPLA
+    monthly_avg_consumption = recent_df.groupby('Ay')['Dogalgaz_Tuketim'].mean().to_dict()
+    
     future_preds = []
-    prediction_values = list(df['Dogalgaz_Tuketim'].iloc[-12:])
+    prediction_values = list(df['Dogalgaz_Tuketim'].iloc[-24:])
     
     for i, date in enumerate(future_dates):
         ay = date.month
@@ -244,17 +258,11 @@ def predict_future(model, scaler, df, feature_cols, n_months, model_type):
         isitma = max(18 - temp, 0)
         sogutma = max(temp - 24, 0)
         
-        # Lag değerleri - GERÇEK DEĞERLERİ KULLAN
-        if i < len(last_12_values):
-            lag1 = prediction_values[-1]
-            lag2 = prediction_values[-2] if len(prediction_values) >= 2 else lag1
-            lag3 = prediction_values[-3] if len(prediction_values) >= 3 else lag1
-            lag12 = last_12_values[-(12-i)] if (12-i) <= len(last_12_values) else lag1
-        else:
-            lag1 = prediction_values[-1]
-            lag2 = prediction_values[-2]
-            lag3 = prediction_values[-3]
-            lag12 = prediction_values[-12]
+        # Lag değerleri
+        lag1 = prediction_values[-1]
+        lag2 = prediction_values[-2] if len(prediction_values) >= 2 else lag1
+        lag3 = prediction_values[-3] if len(prediction_values) >= 3 else lag1
+        lag12 = prediction_values[-12] if len(prediction_values) >= 12 else lag1
         
         # MA değerleri
         ma3 = np.mean(prediction_values[-3:])
@@ -287,10 +295,14 @@ def predict_future(model, scaler, df, feature_cols, n_months, model_type):
         
         # Tahmin
         if model_type == "Ensemble (İkisi Birden)":
-            pred = (model[0].predict(X_future_scaled)[0] + 
-                   model[1].predict(X_future_scaled)[0]) / 2
+            pred_model = (model[0].predict(X_future_scaled)[0] + 
+                         model[1].predict(X_future_scaled)[0]) / 2
         else:
-            pred = model.predict(X_future_scaled)[0]
+            pred_model = model.predict(X_future_scaled)[0]
+        
+        # AYLIK ORTALAMA İLE BLEND (60% model, 40% historical average)
+        historical_avg = monthly_avg_consumption.get(ay, pred_model)
+        pred = 0.70 * pred_model + 0.30 * historical_avg
         
         # Negatif tahminleri engelle
         pred = max(pred, 0)
