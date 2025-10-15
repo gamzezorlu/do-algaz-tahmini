@@ -77,8 +77,7 @@ def load_and_process_data(df):
                                        18 - df['Ortalama_Sicaklik'], 0)
     
     return df
-    
-    ------------------------------
+
 # 🔄 2. Log Dönüşümü ve Gecikmeli Değişkenler
 # --------------------------------------------
 df['Dogalgaz_Tuketim_Log'] = np.log1p(df['Dogalgaz_Tuketim'])
