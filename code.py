@@ -48,9 +48,7 @@ with st.sidebar.expander("📋 Beklenen Veri Formatı"):
 def clean_number(value):
     """Sayı formatını temizle"""
     if isinstance(value, str):
-        # Noktaları kaldır (493.813.816 -> 493813816)
         value = value.replace('.', '')
-        # Virgülü noktaya çevir (2,9 -> 2.9)
         value = value.replace(',', '.')
         try:
             return float(value)
@@ -60,13 +58,10 @@ def clean_number(value):
 
 def load_and_process_data(df):
     """Veriyi yükle ve işle"""
-    # Sütun isimlerini temizle
     df.columns = df.columns.str.strip()
     
     # Tarih sütununu datetime'a çevir
     df['Tarih'] = pd.to_datetime(df['Tarih'], format='%b%Y', errors='coerce')
-    
-    # Eksik tarihleri temizle
     df = df.dropna(subset=['Tarih']).sort_values('Tarih').reset_index(drop=True)
     
     # Tüketim değerini temizle ve milyona çevir
@@ -76,7 +71,7 @@ def load_and_process_data(df):
     if 'Ortalama_Sicaklik' in df.columns:
         df['Ortalama_Sicaklik'] = df['Ortalama_Sicaklik'].apply(clean_number)
     else:
-        df['Ortalama_Sicaklik'] = 15  # Varsayılan değer
+        df['Ortalama_Sicaklik'] = 15
     
     # Diğer meteorolojik değerleri temizle
     for col in ['Nem', 'Ruzgar', 'Yagis']:
@@ -112,38 +107,39 @@ def load_and_process_data(df):
     df['Isitma_Derece_Gun'] = np.maximum(18 - df['Ortalama_Sicaklik'], 0)
     df['Sogutma_Derece_Gun'] = np.maximum(df['Ortalama_Sicaklik'] - 24, 0)
     
-    # Log dönüşümü
-    df['Dogalgaz_Tuketim_Log'] = np.log1p(df['Dogalgaz_Tuketim'])
-    
-    # Gecikmeli değişkenler (Lag)
+    # Gecikmeli değişkenler (Lag) - FORWARD FILL ile eksikleri doldur
     for i in range(1, 4):
-        df[f'Lag{i}'] = df['Dogalgaz_Tuketim_Log'].shift(i)
+        df[f'Lag{i}'] = df['Dogalgaz_Tuketim'].shift(i)
     
-    # Yıllık gecikmeli değişken (12 ay önceki değer)
-    df['Lag12'] = df['Dogalgaz_Tuketim_Log'].shift(12)
+    # Yıllık gecikmeli değişken
+    df['Lag12'] = df['Dogalgaz_Tuketim'].shift(12)
     
     # Hareketli ortalamalar
-    df['MA3'] = df['Dogalgaz_Tuketim_Log'].rolling(window=3, min_periods=1).mean()
-    df['MA6'] = df['Dogalgaz_Tuketim_Log'].rolling(window=6, min_periods=1).mean()
-    df['MA12'] = df['Dogalgaz_Tuketim_Log'].rolling(window=12, min_periods=1).mean()
+    df['MA3'] = df['Dogalgaz_Tuketim'].rolling(window=3, min_periods=1).mean()
+    df['MA6'] = df['Dogalgaz_Tuketim'].rolling(window=6, min_periods=1).mean()
+    df['MA12'] = df['Dogalgaz_Tuketim'].rolling(window=12, min_periods=1).mean()
     
-    # Hareketli standart sapma (volatilite)
-    df['STD3'] = df['Dogalgaz_Tuketim_Log'].rolling(window=3, min_periods=1).std()
+    # Hareketli standart sapma
+    df['STD3'] = df['Dogalgaz_Tuketim'].rolling(window=3, min_periods=1).std().fillna(0)
     
     # Yıllık büyüme oranı
-    df['YoY_Growth'] = df['Dogalgaz_Tuketim_Log'].pct_change(12)
+    df['YoY_Growth'] = df['Dogalgaz_Tuketim'].pct_change(12).fillna(0)
     
     # Sıcaklık ve tüketim etkileşimi
-    df['Temp_Tuketim_Interaction'] = df['Ortalama_Sicaklik'] * df['Lag1']
+    df['Temp_Tuketim_Interaction'] = df['Ortalama_Sicaklik'] * df['Lag1'].fillna(df['Dogalgaz_Tuketim'])
     
-    # Eksik değerleri temizle
-    df = df.dropna()
+    # Eksik değerleri ileri doldur (backward fill yerine forward fill)
+    lag_cols = ['Lag1', 'Lag2', 'Lag3', 'Lag12']
+    for col in lag_cols:
+        df[col] = df[col].fillna(method='bfill').fillna(df['Dogalgaz_Tuketim'].mean())
+    
+    # Kalan NaN'ları temizle
+    df = df.fillna(method='ffill').fillna(method='bfill')
     
     return df
 
 def train_model(df, model_type):
     """Model eğitimi"""
-    # Özellik sütunları
     feature_cols = [
         'Ay', 'Yil', 'Ceyrek', 'Trend', 'Yil_Normalized',
         'Ay_Sin', 'Ay_Cos',
@@ -156,7 +152,7 @@ def train_model(df, model_type):
     ]
     
     X = df[feature_cols]
-    y = df['Dogalgaz_Tuketim_Log']
+    y = df['Dogalgaz_Tuketim']  # LOG KULLANMIYORUZ
     
     # Ölçekleme
     scaler = StandardScaler()
@@ -165,43 +161,42 @@ def train_model(df, model_type):
     # Model seçimi ve eğitimi
     if model_type == "Random Forest":
         model = RandomForestRegressor(
-            n_estimators=1000,
-            max_depth=20,
-            min_samples_split=2,
-            min_samples_leaf=1,
+            n_estimators=300,
+            max_depth=15,
+            min_samples_split=3,
+            min_samples_leaf=2,
             max_features='sqrt',
             random_state=42,
             n_jobs=-1
         )
     elif model_type == "Gradient Boosting":
         model = GradientBoostingRegressor(
-            n_estimators=1000,
-            max_depth=7,
+            n_estimators=300,
+            max_depth=5,
             learning_rate=0.05,
-            min_samples_split=2,
-            min_samples_leaf=1,
+            min_samples_split=3,
+            min_samples_leaf=2,
             subsample=0.8,
             random_state=42
         )
     else:  # Ensemble
         model1 = RandomForestRegressor(
-            n_estimators=500, max_depth=20, random_state=42, n_jobs=-1
+            n_estimators=200, max_depth=15, random_state=42, n_jobs=-1
         )
         model2 = GradientBoostingRegressor(
-            n_estimators=500, max_depth=7, learning_rate=0.05, random_state=42
+            n_estimators=200, max_depth=5, learning_rate=0.05, random_state=42
         )
         model1.fit(X_scaled, y)
         model2.fit(X_scaled, y)
-        model = (model1, model2)  # Tuple olarak döndür
+        model = (model1, model2)
     
     if model_type != "Ensemble (İkisi Birden)":
         model.fit(X_scaled, y)
-        y_pred_log = model.predict(X_scaled)
+        y_pred = model.predict(X_scaled)
     else:
-        y_pred_log = (model[0].predict(X_scaled) + model[1].predict(X_scaled)) / 2
+        y_pred = (model[0].predict(X_scaled) + model[1].predict(X_scaled)) / 2
     
-    y_pred = np.expm1(y_pred_log)
-    y_real = np.expm1(y)
+    y_real = y
     
     return model, scaler, X, y, y_pred, y_real, feature_cols
 
@@ -211,19 +206,19 @@ def predict_future(model, scaler, df, feature_cols, n_months, model_type):
     future_dates = pd.date_range(last_date + pd.DateOffset(months=1), 
                                  periods=n_months, freq='MS')
     
-    # Son değerleri sakla
-    last_values = list(df['Dogalgaz_Tuketim_Log'].iloc[-12:])
+    # Son 12 ayın gerçek değerlerini kullan
+    last_12_values = list(df['Dogalgaz_Tuketim'].iloc[-12:])
     last_trend = df['Trend'].iloc[-1]
     base_year = df['Yil'].min()
     year_range = df['Yil'].max() - base_year
     
-    # Son değerler
-    last_ma_values = list(df['Dogalgaz_Tuketim_Log'].iloc[-12:])
-    
-    # Aylık ortalama sıcaklıklar
-    monthly_avg_temp = df.groupby('Ay')['Ortalama_Sicaklik'].mean().to_dict()
+    # Aylık ortalama sıcaklıklar - SON 3 YILIN ORTALAMASINI AL
+    recent_years = df['Yil'].max() - 2
+    recent_df = df[df['Yil'] >= recent_years]
+    monthly_avg_temp = recent_df.groupby('Ay')['Ortalama_Sicaklik'].mean().to_dict()
     
     future_preds = []
+    prediction_values = list(df['Dogalgaz_Tuketim'].iloc[-12:])
     
     for i, date in enumerate(future_dates):
         ay = date.month
@@ -249,21 +244,27 @@ def predict_future(model, scaler, df, feature_cols, n_months, model_type):
         isitma = max(18 - temp, 0)
         sogutma = max(temp - 24, 0)
         
-        # Lag değerleri
-        lag1 = last_values[-1]
-        lag2 = last_values[-2]
-        lag3 = last_values[-3]
-        lag12 = last_values[-12] if len(last_values) >= 12 else lag1
+        # Lag değerleri - GERÇEK DEĞERLERİ KULLAN
+        if i < len(last_12_values):
+            lag1 = prediction_values[-1]
+            lag2 = prediction_values[-2] if len(prediction_values) >= 2 else lag1
+            lag3 = prediction_values[-3] if len(prediction_values) >= 3 else lag1
+            lag12 = last_12_values[-(12-i)] if (12-i) <= len(last_12_values) else lag1
+        else:
+            lag1 = prediction_values[-1]
+            lag2 = prediction_values[-2]
+            lag3 = prediction_values[-3]
+            lag12 = prediction_values[-12]
         
         # MA değerleri
-        ma3 = np.mean(last_ma_values[-3:])
-        ma6 = np.mean(last_ma_values[-6:])
-        ma12 = np.mean(last_ma_values[-12:])
-        std3 = np.std(last_ma_values[-3:])
+        ma3 = np.mean(prediction_values[-3:])
+        ma6 = np.mean(prediction_values[-6:])
+        ma12 = np.mean(prediction_values[-12:])
+        std3 = np.std(prediction_values[-3:]) if len(prediction_values) >= 3 else 0
         
         # YoY Growth
-        if len(last_values) >= 12:
-            yoy_growth = (last_values[-1] - last_values[-12]) / abs(last_values[-12] + 1e-10)
+        if len(prediction_values) >= 12:
+            yoy_growth = (prediction_values[-1] - prediction_values[-12]) / (abs(prediction_values[-12]) + 1e-10)
         else:
             yoy_growth = 0
         
@@ -286,16 +287,16 @@ def predict_future(model, scaler, df, feature_cols, n_months, model_type):
         
         # Tahmin
         if model_type == "Ensemble (İkisi Birden)":
-            pred_log = (model[0].predict(X_future_scaled)[0] + 
-                       model[1].predict(X_future_scaled)[0]) / 2
+            pred = (model[0].predict(X_future_scaled)[0] + 
+                   model[1].predict(X_future_scaled)[0]) / 2
         else:
-            pred_log = model.predict(X_future_scaled)[0]
+            pred = model.predict(X_future_scaled)[0]
         
-        pred_real = np.expm1(pred_log)
+        # Negatif tahminleri engelle
+        pred = max(pred, 0)
         
-        future_preds.append(pred_real)
-        last_values.append(pred_log)
-        last_ma_values.append(pred_log)
+        future_preds.append(pred)
+        prediction_values.append(pred)
     
     future_df = pd.DataFrame({
         'Tarih': future_dates,
@@ -320,7 +321,11 @@ if uploaded_file is not None:
         with st.spinner("⚙️ Veri işleniyor..."):
             df_processed = load_and_process_data(df)
         
-        st.info(f"✓ İşlenmiş veri: {len(df_processed)} satır ({len(df) - len(df_processed)} satır lag nedeniyle çıkarıldı)")
+        st.info(f"✓ İşlenmiş veri: {len(df_processed)} satır")
+        
+        # Son 5 satırı göster - debugging için
+        with st.expander("🔍 Son 5 Satır (Debugging)"):
+            st.dataframe(df_processed[['Tarih', 'Dogalgaz_Tuketim', 'Ortalama_Sicaklik', 'Lag1', 'Lag12']].tail())
         
         # Model eğit
         with st.spinner(f"🧠 {model_type} modeli eğitiliyor..."):
@@ -330,7 +335,7 @@ if uploaded_file is not None:
         mae = mean_absolute_error(y_real, y_pred)
         rmse = np.sqrt(mean_squared_error(y_real, y_pred))
         r2 = r2_score(y_real, y_pred)
-        mape = np.mean(np.abs((y_real - y_pred) / y_real)) * 100
+        mape = np.mean(np.abs((y_real - y_pred) / (y_real + 1e-10))) * 100
         
         # Metrikler
         col1, col2, col3, col4 = st.columns(4)
@@ -403,7 +408,6 @@ if uploaded_file is not None:
         col1, col2 = st.columns(2)
         
         with col1:
-            # Tahmin vs Gerçek scatter plot
             fig_scatter = go.Figure()
             fig_scatter.add_trace(go.Scatter(
                 x=y_real,
@@ -428,7 +432,6 @@ if uploaded_file is not None:
             st.plotly_chart(fig_scatter, use_container_width=True)
         
         with col2:
-            # Hata dağılımı
             errors = y_pred - y_real
             fig_error = go.Figure()
             fig_error.add_trace(go.Histogram(
@@ -451,7 +454,6 @@ if uploaded_file is not None:
         future_display['Tarih'] = future_display['Tarih'].dt.strftime('%B %Y')
         future_display['Tahmin_Tuketim'] = future_display['Tahmin_Tuketim'].round(2)
         
-        # Mevsim bilgisi ekle
         future_display['Mevsim'] = future_df['Tarih'].dt.month.map({
             12: 'Kış', 1: 'Kış', 2: 'Kış',
             3: 'İlkbahar', 4: 'İlkbahar', 5: 'İlkbahar',
@@ -514,7 +516,6 @@ if uploaded_file is not None:
 else:
     st.info("👈 Lütfen sol menüden bir Excel dosyası yükleyin.")
     
-    # Örnek veri göster
     st.subheader("📝 Örnek Veri Formatı")
     example_data = pd.DataFrame({
         'Tarih': ['Jan2016', 'Feb2016', 'Mar2016', 'Apr2016', 'May2016'],
